@@ -107,6 +107,16 @@ class PortableTest(unittest.TestCase):
         c=common.connect(self.run/'state.sqlite');row=c.execute("SELECT extraction_status,text FROM candidates WHERE id='101'").fetchone();c.close()
         self.assertEqual(row[0],'ready');self.assertIn(pages[0]['text'],row[1])
 
+    def test_new_version_rebinds_rows_and_duplicate_ids_rejected(self):
+        self.candidate(done=True)
+        p=self.root/'sources'/'Матка №1.xlsx';wb=load_workbook(p);ws=wb['Матка №1']
+        ws['B2']='102';ws['B3']='101';wb.save(p);wb.close()
+        service.scan(new_version=True);run=common.active();c=common.connect(run/'state.sqlite')
+        row=c.execute("SELECT source_row,review_status,text,result FROM candidates WHERE id='102'").fetchone();c.close()
+        self.assertEqual(row[0],2);self.assertEqual(row[1],'pending');self.assertTrue(row[2]);self.assertIsNone(row[3])
+        p=books.template(run);wb=load_workbook(p);ws=wb['Матка №1'];ws['B3']='102';wb.save(p);wb.close()
+        with self.assertRaisesRegex(ValueError,'Повторный ID'):service.source_rows(run)
+
     def test_backup_strips_cv_blobs_and_restores(self):
         self.candidate(done=True)
         c=sqlite3.connect(self.run/'state.sqlite');c.execute('CREATE TABLE source_files(hash TEXT,bytes BLOB)');c.execute('INSERT INTO source_files VALUES(?,?)',('h',b'%PDF ORIGINAL CV'));c.commit();c.close()

@@ -44,8 +44,15 @@ def prepare(run):
 
 def source_rows(run):
     wb=load_workbook(template(run),read_only=True,data_only=False)
-    result={str(v[1]):(n,v) for n,v in enumerate(wb[source_sheet(run)].iter_rows(min_row=2,values_only=True),2) if len(v)>1 and v[1] is not None}
-    wb.close();return result
+    try:
+        result={}
+        for n,v in enumerate(wb[source_sheet(run)].iter_rows(min_row=2,values_only=True),2):
+            if len(v)<2 or v[1] is None:continue
+            ident=str(v[1])
+            if ident in result:raise ValueError('Повторный ID в исходной таблице: '+ident)
+            result[ident]=(n,v)
+        return result
+    finally:wb.close()
 
 def new_run(previous=None):
     layout()
@@ -74,9 +81,12 @@ def new_run(previous=None):
     CREATE TABLE documents(hash TEXT PRIMARY KEY,path TEXT,kind TEXT,status TEXT,pages TEXT,error TEXT,updated_utc TEXT);''')
     if previous:
         old=sqlite3.connect((previous/'state.sqlite').resolve().as_uri()+'?mode=ro',uri=True);old.row_factory=sqlite3.Row
+        current_rows=source_rows(run)
         for r in old.execute('SELECT * FROM candidates'):
+            if r['id'] not in current_rows:continue
             # Reuse full text only. Scores/bans must be reconsidered for new criteria.
-            c.execute('INSERT INTO candidates(id,source_row,files,fingerprint,extraction_status,text,documents,error) VALUES(?,?,?,?,?,?,?,?)',tuple(r[k] for k in ('id','source_row','files','fingerprint','extraction_status','text','documents','error')))
+            values=[r[k] for k in ('id','source_row','files','fingerprint','extraction_status','text','documents','error')];values[1]=current_rows[r['id']][0]
+            c.execute('INSERT INTO candidates(id,source_row,files,fingerprint,extraction_status,text,documents,error) VALUES(?,?,?,?,?,?,?,?)',values)
         for r in old.execute("SELECT * FROM documents WHERE status='ready'"):
             c.execute('INSERT OR IGNORE INTO documents VALUES(?,?,?,?,?,?,?)',tuple(r[k] for k in ('hash','path','kind','status','pages','error','updated_utc')))
         old.close()
@@ -121,7 +131,7 @@ def scan(new_version=False):
         old_hashes=sorted(set(f['sha256'] for f in json.loads(old['files']))) if old else []
         with c:
             if old and hashes==old_hashes:
-                c.execute('UPDATE candidates SET files=?,fingerprint=? WHERE id=?',(json.dumps(files,ensure_ascii=False),fp,ident))
+                c.execute('UPDATE candidates SET source_row=?,files=?,fingerprint=? WHERE id=?',(source[ident][0],json.dumps(files,ensure_ascii=False),fp,ident))
             elif old:
                 c.execute('INSERT INTO portable_revisions(id,kind,payload,created) VALUES(?,?,?,?)',(ident,'cv_changed',json.dumps(dict(old),ensure_ascii=False),stamp()))
                 c.execute("UPDATE candidates SET files=?,fingerprint=?,extraction_status='pending',review_status='pending',text=NULL,documents=NULL,error=NULL,result=NULL,exported_revision=NULL WHERE id=?",(json.dumps(files,ensure_ascii=False),fp,ident))
