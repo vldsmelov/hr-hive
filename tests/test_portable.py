@@ -162,6 +162,28 @@ class PortableTest(unittest.TestCase):
         p=self.root/'106.pdf';pdf.save(p);pdf.close();res=documents.extract_file(p);self.assertEqual(len(res['pages']),2);self.assertTrue(all(x['method']=='ocr' for x in res['pages']))
         p=self.root/'bad.crdownload';p.write_bytes(b'incomplete');self.assertRaises(ValueError,documents.extract_file,p)
 
+    def test_office_conversion_odt_pptx_and_unicode_folder(self):
+        sentence='Synthetic engineering resume with practical production and equipment maintenance experience.'
+        odt=self.root/'111.odt'
+        with zipfile.ZipFile(odt,'w') as z:
+            z.writestr('content.xml','<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text><text:p>'+sentence+'</text:p></office:text></office:body></office:document-content>')
+        self.assertIn(sentence,documents.extract_file(odt)['pages'][0]['text'])
+        pptx=self.root/'112.pptx'
+        with zipfile.ZipFile(pptx,'w') as z:
+            z.writestr('ppt/slides/slide1.xml','<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:r><a:t>'+sentence+'</a:t></a:r></a:p></p:sld>')
+        self.assertIn(sentence,documents.extract_file(pptx)['pages'][0]['text'])
+        if shutil_which('soffice'):
+            rtf=self.root/'113.rtf';rtf.write_text('{\\rtf1\\ansi '+sentence+'}',encoding='ascii')
+            out=self.root/'doc_output';out.mkdir()
+            subprocess.run(['soffice','-env:UserInstallation='+(self.root/'lo').as_uri(),'--headless','--convert-to','doc','--outdir',str(out),str(rtf)],check=True,capture_output=True,timeout=60)
+            converted=out/'113.doc';self.assertTrue(converted.exists())
+            self.assertIn('Synthetic',documents.extract_file(converted)['pages'][0]['text'])
+        import unicodedata
+        folder=self.root/'cvs'/unicodedata.normalize('NFD','Папка й');folder.mkdir()
+        (folder/'101.txt').write_text(sentence,encoding='utf-8');self.assertEqual(service.scan()['new'],['101'])
+        folder.rename(folder.with_name(unicodedata.normalize('NFC',folder.name)))
+        self.assertEqual(service.scan()['changed'],[])
+
 def shutil_which(name):
     import shutil
     return shutil.which(name)

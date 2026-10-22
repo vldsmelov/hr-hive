@@ -34,6 +34,7 @@ def archive_tree(source,target,skip_cvs=True):
         with tarfile.open(target,'w:gz',compresslevel=5) as tar:
             for p in sorted(source.rglob('*')):
                 if not p.is_file():continue
+                if p.resolve() in (target.resolve(),target.with_name(target.name+'.sha256').resolve()):continue
                 rel=p.relative_to(source)
                 if skip_cvs and rel.parts[0] in ('cvs','backups'):continue
                 if any(x.lower() in ('__pycache__','.git') for x in rel.parts):continue
