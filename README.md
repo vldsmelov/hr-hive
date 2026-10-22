@@ -6,6 +6,8 @@
 
 Установите Git, Docker Desktop для своего процессора, VS Code и расширение Codex. Запустите Docker Desktop и войдите в Codex в VS Code.
 
+Для клонирования приватного репозитория войдите в GitHub через VS Code либо GitHub CLI (`gh auth login`). Если команда `code` не установлена, откройте папку проекта через меню VS Code → File → Open Folder.
+
 ```sh
 git clone https://github.com/vldsmelov/hr-hive.git
 cd hr-hive

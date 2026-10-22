@@ -162,8 +162,9 @@ def export(run, target=None):
     with zipfile.ZipFile(tmp,'w',zipfile.ZIP_DEFLATED) as z:
         for n,raw in items.items():z.writestr(n,raw)
     verify(tmp,path,meta['sheet'],rows)
-    if target.exists():shutil.copy2(target,target.with_name(target.stem+'.previous.xlsx'))
-    try:os.replace(tmp,target)
+    try:
+        if target.exists():shutil.copy2(target,target.with_name(target.stem+'.previous.xlsx'))
+        os.replace(tmp,target)
     except PermissionError:
         target=target.with_name(target.stem+'.'+datetime.now().strftime('%Y%m%d_%H%M%S')+'.xlsx');os.replace(tmp,target)
     c=connect(run/'state.sqlite')

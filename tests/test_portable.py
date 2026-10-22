@@ -70,6 +70,9 @@ class PortableTest(unittest.TestCase):
         with patch('app.books.os.replace',side_effect=locked_replace):
             other=books.export(self.run)
             self.assertNotEqual(Path(other['path']).name,p.name)
+        with patch('app.books.shutil.copy2',side_effect=PermissionError()):
+            other=books.export(self.run)
+            self.assertNotEqual(Path(other['path']).name,p.name)
 
     def test_scan_missing_preserves_completed_unicode_and_change(self):
         self.candidate(done=True)
