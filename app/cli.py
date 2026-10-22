@@ -10,10 +10,11 @@ from .common import DATA,active,layout,read
 
 def main():
     p=argparse.ArgumentParser(description='HR Hive: полные документы, семантическая оценка Codex и устойчивые результаты')
-    p.add_argument('command',choices=['doctor','status','scan','extract','retry','claim','show','preview','submit','export','backup','restore','profiles'])
+    p.add_argument('command',choices=['doctor','status','use','scan','extract','retry','claim','show','preview','submit','export','backup','restore','profiles'])
     p.add_argument('--worker',default='codex');p.add_argument('--count',type=int,default=5)
     p.add_argument('--id');p.add_argument('--ids',nargs='+');p.add_argument('--offset',type=int,default=0);p.add_argument('--limit',type=int,default=10000)
     p.add_argument('--file');p.add_argument('--output');p.add_argument('--destination');p.add_argument('--all',action='store_true');p.add_argument('--new-version',action='store_true')
+    p.add_argument('--run')
     a=p.parse_args()
     from . import service
     if a.command=='doctor':
@@ -21,6 +22,10 @@ def main():
         result={'python':sys.version,'architecture':platform.machine(),'data_directory':str(DATA),'libreoffice':shutil.which('soffice'),'tesseract':shutil.which('tesseract'),'ocr_languages':langs.stdout if langs else None,'dependencies':{x:importlib.metadata.version(x) for x in ('openpyxl','PyMuPDF','Pillow','lxml','rapidfuzz')}}
         if not result['libreoffice'] or not langs or not all(x in langs.stdout.split() for x in ('rus','eng')):raise RuntimeError('Неполное окружение OCR/LibreOffice')
     elif a.command=='status':result=service.status(a.all)
+    elif a.command=='use':
+        if not a.run or Path(a.run).name!=a.run or not (DATA/'state/runs'/a.run/'portable.json').is_file():p.error('--run должен быть именем существующего запуска из status --all')
+        from .common import dump
+        dump(DATA/'state/active.json',{'run':a.run});result={'active_run':a.run}
     elif a.command=='scan':result=service.scan(a.new_version)
     elif a.command in ('extract','retry'):result=service.extract(a.command=='retry',a.ids)
     elif a.command=='claim':result=service.claim(a.worker,a.count)

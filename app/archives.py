@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from .common import DATA, dump, layout, read, sha, stamp
 
-EXCLUDED_DIRS={'cvs','converted','ocr_images','audio_env','.venv','venv','__pycache__','.git','node_modules','hr-hive','transfer','migration_staging'}
+EXCLUDED_DIRS={'cvs','converted','ocr_images','audio_env','audio_models','.venv','venv','__pycache__','.git','node_modules','hr-hive','transfer','migration_staging'}
 EXCLUDED_SUFFIXES={'.png','.jpg','.jpeg','.gif','.webp','.bmp','.tif','.tiff','.pdf','.doc','.docx','.rtf','.pages','.odt','.aac','.pptx','.dotx','.jfif','.crdownload','.zip','.pyc'}
 
 def snapshot(source,dest,strip_originals=True):
@@ -37,7 +37,7 @@ def archive_tree(source,target,skip_cvs=True):
                 if p.resolve() in (target.resolve(),target.with_name(target.name+'.sha256').resolve()):continue
                 rel=p.relative_to(source)
                 if skip_cvs and rel.parts[0] in ('cvs','backups'):continue
-                if any(x.lower() in ('__pycache__','.git') for x in rel.parts):continue
+                if any(x.lower() in ('__pycache__','.git','audio_models','audio_env','.venv','venv','node_modules') for x in rel.parts):continue
                 if p.name.endswith(('-wal','-shm','.tmp')):continue
                 use=p;stripped=0
                 if p.suffix=='.sqlite':

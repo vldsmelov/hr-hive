@@ -21,11 +21,19 @@ from .engine.profiles import assess, catalog
 def portable_meta(run):
     return read(run/'portable.json')
 
+def implementation_hash():
+    folder=Path(__file__).parent/'engine'
+    pairs=[(p.name,sha(p)) for p in sorted(folder.glob('*.py'))]
+    return hashlib.sha256(json.dumps(pairs).encode()).hexdigest()
+
 def rules_hash(inputs):
     pairs=[(unicodedata.normalize('NFC',str(p.relative_to(inputs)).replace('\\','/')),sha(p)) for p in inputs.rglob('*') if p.is_file() and p.suffix.lower() in ('.csv','.xlsx','.json')]
     return hashlib.sha256(json.dumps(sorted(pairs),ensure_ascii=False).encode()).hexdigest()
 
 def prepare(run):
+    meta=portable_meta(run)
+    if 'implementation_hash' not in meta:
+        meta['implementation_hash']=implementation_hash();dump(run/'portable.json',meta)
     c=connect(run/'state.sqlite')
     c.executescript('''
     CREATE TABLE IF NOT EXISTS portable_receipts(id TEXT, text_sha256 TEXT, start INTEGER, end INTEGER, PRIMARY KEY(id,text_sha256,start));
@@ -59,7 +67,7 @@ def new_run(previous=None):
     meta.update(as_of=datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat(),sheet=sheet,version='portable-1')
     meta['input_hashes']={p.relative_to(run/'inputs').as_posix():sha(p) for p in (run/'inputs').rglob('*') if p.is_file()}
     dump(run/'manifest.json',meta)
-    dump(run/'portable.json',{'source_book':src.relative_to(run).as_posix(),'sheet':sheet,'output_name':'Результаты проверки.xlsx','rules_hash':rules_hash(run/'inputs'),'created':stamp(),'previous':previous.name if previous else None})
+    dump(run/'portable.json',{'source_book':src.relative_to(run).as_posix(),'sheet':sheet,'output_name':'Результаты проверки.xlsx','rules_hash':rules_hash(run/'inputs'),'implementation_hash':implementation_hash(),'created':stamp(),'previous':previous.name if previous else None})
     c=connect(run/'state.sqlite')
     c.executescript('''CREATE TABLE candidates(id TEXT PRIMARY KEY,source_row INTEGER NOT NULL,files TEXT NOT NULL,fingerprint TEXT NOT NULL,extraction_status TEXT NOT NULL DEFAULT 'pending',text TEXT,documents TEXT,error TEXT,review_status TEXT NOT NULL DEFAULT 'pending',result TEXT,reviewed_utc TEXT,exported_revision INTEGER);
     CREATE TABLE fact_cards(id TEXT PRIMARY KEY,card TEXT,text_sha256 TEXT,updated_utc TEXT);
@@ -77,6 +85,7 @@ def new_run(previous=None):
 def scan(new_version=False):
     layout()
     run=active() if (DATA/'state'/'active.json').exists() else new_run()
+    prepare(run)
     meta=portable_meta(run)
     # Compare only sources provided by the operator. Missing files are not deletions.
     changed=[]
@@ -91,6 +100,8 @@ def scan(new_version=False):
         run=new_run(run)
     if rules_hash(run/'inputs')!=portable_meta(run)['rules_hash']:
         raise ValueError('Изменён снимок источников активного запуска; восстановите его и создайте новую версию через data/sources')
+    if implementation_hash()!=portable_meta(run)['implementation_hash']:
+        raise ValueError('Изменён движок правил: требуется scan --new-version')
     prepare(run);source=source_rows(run)
     groups=collections.defaultdict(list);ignored=[]
     for p in (DATA/'cvs').rglob('*'):
@@ -194,6 +205,7 @@ def preview(card,worker=None):
     if not r or r['extraction_status']!='ready':raise ValueError('Текст не готов')
     if not card.get('full_text_review_complete'):raise ValueError('Не подтверждено полное чтение')
     if rules_hash(run/'inputs')!=portable_meta(run)['rules_hash']:raise ValueError('Источники версии изменены; требуется новая версия проверки')
+    if implementation_hash()!=portable_meta(run)['implementation_hash']:raise ValueError('Движок правил изменён; требуется scan --new-version')
     h=hashlib.sha256(r['text'].encode()).hexdigest()
     if card.get('reviewed_text_sha256')!=h:raise ValueError('Укажите актуальный reviewed_text_sha256 из show')
     end=0
@@ -228,6 +240,8 @@ def submit(card,worker):
     with c:
         c.execute('BEGIN IMMEDIATE')
         old=c.execute('SELECT * FROM candidates WHERE id=?',(ident,)).fetchone()
+        if old['extraction_status']!='ready' or hashlib.sha256((old['text'] or '').encode()).hexdigest()!=result['text_sha256']:
+            raise ValueError('Документ изменился между preview и сохранением; перечитайте новую версию')
         if old['review_status']=='reviewed':
             raise ValueError('Завершённая проверка: создайте новую версию для пересмотра')
         c.execute('INSERT INTO portable_revisions(id,kind,payload,created) VALUES(?,?,?,?)',(ident,'completed',json.dumps(result,ensure_ascii=False),stamp()))

@@ -1,4 +1,4 @@
-FROM python:3.13.12-slim-bookworm
+FROM python:3.13.12-slim-bookworm@sha256:a58daefb915e1e03ad48f3ca4df8832065412c5c35cacb9d39f4229184de12b6
 ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 LANG=C.UTF-8 TZ=Europe/Moscow HR_DATA=/data
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer libreoffice-impress tesseract-ocr tesseract-ocr-rus \

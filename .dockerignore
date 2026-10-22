@@ -5,3 +5,5 @@
 !app/**
 !rules/
 !rules/**
+**/__pycache__
+**/*.pyc
