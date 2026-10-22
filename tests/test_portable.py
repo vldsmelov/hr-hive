@@ -96,6 +96,17 @@ class PortableTest(unittest.TestCase):
         service.show('102',10,20000)
         with self.assertRaisesRegex(ValueError,'русский'):service.preview(card)
 
+    def test_legacy_complete_text_is_reused_by_content_hash(self):
+        p=self.root/'cvs'/'101.txt';p.write_text('Полный текст документа для синтетической проверки кэша.',encoding='utf-8')
+        service.scan();h=common.sha(p);pages=[{'page':1,'method':'text','text':p.read_text('utf-8')}]
+        c=common.connect(self.run/'state.sqlite')
+        with c:c.execute('INSERT INTO documents VALUES(?,?,?,?,?,?,?)',(h,'old/windows/path','text','ready',json.dumps(pages,ensure_ascii=False),None,common.stamp()))
+        c.close()
+        with patch('app.service.extract_file',side_effect=AssertionError('Повторное извлечение не требуется')):
+            service.extract()
+        c=common.connect(self.run/'state.sqlite');row=c.execute("SELECT extraction_status,text FROM candidates WHERE id='101'").fetchone();c.close()
+        self.assertEqual(row[0],'ready');self.assertIn(pages[0]['text'],row[1])
+
     def test_backup_strips_cv_blobs_and_restores(self):
         self.candidate(done=True)
         c=sqlite3.connect(self.run/'state.sqlite');c.execute('CREATE TABLE source_files(hash TEXT,bytes BLOB)');c.execute('INSERT INTO source_files VALUES(?,?)',('h',b'%PDF ORIGINAL CV'));c.commit();c.close()

@@ -77,6 +77,8 @@ def new_run(previous=None):
         for r in old.execute('SELECT * FROM candidates'):
             # Reuse full text only. Scores/bans must be reconsidered for new criteria.
             c.execute('INSERT INTO candidates(id,source_row,files,fingerprint,extraction_status,text,documents,error) VALUES(?,?,?,?,?,?,?,?)',tuple(r[k] for k in ('id','source_row','files','fingerprint','extraction_status','text','documents','error')))
+        for r in old.execute("SELECT * FROM documents WHERE status='ready'"):
+            c.execute('INSERT OR IGNORE INTO documents VALUES(?,?,?,?,?,?,?)',tuple(r[k] for k in ('hash','path','kind','status','pages','error','updated_utc')))
         old.close()
     c.commit();c.close();prepare(run)
     dump(DATA/'state'/'active.json',{'run':ident})
@@ -162,7 +164,13 @@ def extract(retry=False,ids=None):
             docs=[];used=set()
             for f in json.loads(row['files']):
                 if f['sha256'] in used:continue
-                used.add(f['sha256']);p=locate(f);doc=extract_file(p,use_cache=not retry)
+                used.add(f['sha256']);p=locate(f)
+                cached=c.execute("SELECT pages FROM documents WHERE hash=? AND status='ready'",(f['sha256'],)).fetchone() if not retry else None
+                pages=json.loads(cached[0]) if cached else []
+                if pages and all(pg.get('text','').strip() and not broken(pg['text']) and pg.get('method')!='ocr_pending' for pg in pages):
+                    doc={'sha256':f['sha256'],'pages':pages,'original_name':p.name}
+                else:
+                    doc=extract_file(p,use_cache=not retry)
                 doc['file']=p.relative_to(DATA/'cvs').as_posix();docs.append(doc)
             text='\n\n'.join('FILE '+d['file']+'\n'+'\n'.join('PAGE '+str(p['page'])+'\n'+p['text'] for p in d['pages']) for d in docs)
             with c:c.execute("UPDATE candidates SET text=?,documents=?,extraction_status='ready',error=NULL WHERE id=?",(text,json.dumps(docs,ensure_ascii=False),row['id']))
