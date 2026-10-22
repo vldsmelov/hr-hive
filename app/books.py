@@ -133,6 +133,24 @@ def export(run, target=None):
                     if refs and not any(x.text for x in refs):parent.remove(elem)
         if parent.tag.split('}')[-1]=='dataValidations':
             parent.set('count',str(sum(x.tag.split('}')[-1]=='dataValidation' for x in parent)))
+    # Do not carry unused candidate strings or unreferenced hyperlink addresses.
+    shared_part='xl/sharedStrings.xml'
+    if shared_part in items:
+        shared=E.fromstring(items[shared_part]);entries=list(shared)
+        cells=[x for x in sheet.iter(q('c')) if x.get('t')=='s']
+        used=sorted({int(x.find(q('v')).text) for x in cells})
+        indexes={old:new for new,old in enumerate(used)}
+        for child in list(shared):shared.remove(child)
+        for index in used:shared.append(entries[index])
+        for cell in cells:cell.find(q('v')).text=str(indexes[int(cell.find(q('v')).text)])
+        shared.set('count',str(len(cells)));shared.set('uniqueCount',str(len(used)))
+        items[shared_part]=E.tostring(shared,encoding='utf-8',xml_declaration=True)
+    sheet_rels=posixpath.dirname(part)+'/_rels/'+posixpath.basename(part)+'.rels'
+    if sheet_rels in items:
+        sr=E.fromstring(items[sheet_rels]);used_rids={x.get('{'+R+'}id') for x in sheet.iter() if x.get('{'+R+'}id')}
+        for rel in list(sr):
+            if rel.get('Id') not in used_rids:sr.remove(rel)
+        items[sheet_rels]=E.tostring(sr,encoding='utf-8',xml_declaration=True)
     items[part]=E.tostring(sheet,encoding='utf-8',xml_declaration=True)
     items['xl/workbook.xml']=E.tostring(workbook,encoding='utf-8',xml_declaration=True)
     items['xl/_rels/workbook.xml.rels']=E.tostring(rels,encoding='utf-8',xml_declaration=True)

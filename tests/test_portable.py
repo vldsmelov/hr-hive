@@ -32,6 +32,7 @@ class PortableTest(unittest.TestCase):
         s.append(['ИИ','ID']+['Поле '+str(i) for i in range(3,30)]+['Подразделение','Комментарий'])
         for ident in ('101','102','103'):
             s.append([None,ident]+['значение']*27+['старый результат','старый комментарий'])
+        s['D2'].hyperlink='https://example.test/unprocessed-101'
         s['C3']='=1+2';s['D3'].hyperlink='https://example.test/путь';s['D3'].number_format='@';s['D3'].fill=PatternFill('solid',fgColor='00FF00')
         dv=DataValidation(type='list',formula1='"да,нет"');dv.add('E2:E4');s.add_data_validation(dv)
         wb.create_sheet('Другой лист');wb.save(self.root/'sources'/'Матка №1.xlsx')
@@ -56,6 +57,8 @@ class PortableTest(unittest.TestCase):
         self.assertEqual(s['D2'].hyperlink.target,'https://example.test/путь')
         self.assertEqual(str(s.data_validations.dataValidation[0].sqref),'E2')
         self.assertEqual(s['AE2'].value,'Уточнить опыт переговоров');w.close()
+        with zipfile.ZipFile(p) as z:
+            self.assertNotIn(b'unprocessed-101',b''.join(z.read(n) for n in z.namelist()))
         # A crash after transaction and before workbook export loses no result.
         p.unlink();self.assertEqual(books.export(self.run)['rows'],1)
         real_replace=os.replace
