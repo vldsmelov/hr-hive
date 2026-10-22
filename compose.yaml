@@ -1,0 +1,10 @@
+services:
+  app:
+    build: .
+    environment:
+      HR_DATA: /data
+      TZ: Europe/Moscow
+    volumes:
+      - ./data:/data
+    init: true
+    stop_grace_period: 60s

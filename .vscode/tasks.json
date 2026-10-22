@@ -1,0 +1,10 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label":"HR: проверить окружение","type":"process","command":"docker","args":["compose","run","--rm","app","doctor"],"problemMatcher":[]},
+    {"label":"HR: состояние всех запусков","type":"process","command":"docker","args":["compose","run","--rm","app","status","--all"],"problemMatcher":[]},
+    {"label":"HR: сканировать CV","type":"process","command":"docker","args":["compose","run","--rm","app","scan"],"problemMatcher":[]},
+    {"label":"HR: извлечь тексты и OCR","type":"process","command":"docker","args":["compose","run","--rm","app","extract"],"problemMatcher":[]},
+    {"label":"HR: выгрузить Excel","type":"process","command":"docker","args":["compose","run","--rm","app","export"],"problemMatcher":[]}
+  ]
+}
