@@ -92,7 +92,9 @@ def archive_tree(source,target,skip_cvs=True):
     """Snapshot databases into staging before compressing; manifest covers every file."""
     source=Path(source);target=Path(target);target.parent.mkdir(parents=True,exist_ok=True)
     if target.exists():raise ValueError('Архив уже существует; выберите новое имя')
-    evidence=evidence_inventory(source);diagnostics=diagnostic_inventory(source);excluded=Counter()
+    # Excluded scratch files are absent after restore. Preserve the record;
+    # still enforce its hash if a file with that path exists again.
+    evidence=evidence_inventory(source);diagnostics=diagnostic_inventory(source,require_files=False);excluded=Counter()
     manifest={'format':'hr-hive-backup-v1','created_utc':stamp(),'files':[],
               'excluded_originals':skip_cvs,'excluded_files':[],'rule_evidence':evidence,
               'excluded_diagnostics':list(diagnostics.values())}

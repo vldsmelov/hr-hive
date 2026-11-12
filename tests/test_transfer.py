@@ -121,6 +121,12 @@ class TransferBackupTest(unittest.TestCase):
         with tarfile.open(archive) as contents:
             self.assertNotIn(record['path'],contents.getnames())
             self.assertEqual(json.load(contents.extractfile('BACKUP_MANIFEST.json'))['excluded_diagnostics'],[record])
+        restored=Path(self.temp.name)/'restored'
+        archives.restore(archive,restored)
+        archives.archive_tree(restored,Path(self.temp.name)/'next-backup.tar.gz')
+        path.write_bytes(b'changed scratch')
+        with self.assertRaisesRegex(ValueError,'диагностическая копия'):
+            archives.archive_tree(self.root,Path(self.temp.name)/'changed-backup.tar.gz')
         record['path']='state/runs/active/state.sqlite'
         common.dump(inventory,{'files':[record]})
         with self.assertRaisesRegex(ValueError,'рабочие данные'):archives.diagnostic_inventory(self.root)
