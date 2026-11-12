@@ -25,7 +25,7 @@ def source_window(text,label,period=None):
 def attach(ban,card,text):
  for f in ban['findings']:
   original_label=f.get('employer') or f.get('candidate_name') or card.get('name','')
-  label=card.get('ban_quote_anchors',{}).get(original_label,original_label)
+  label=f.get('source_cv_anchor') or card.get('ban_quote_anchors',{}).get(original_label,original_label)
   evidence=source_window(text,label,f.get('period'))
   if evidence:
    f.update(evidence)

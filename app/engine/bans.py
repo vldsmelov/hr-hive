@@ -20,8 +20,8 @@ VERIFIED_NONMATCHES = [
 
 class StructuredBans(AcceptedStructuredBans):
     """Keep the accepted rules, correct a verified company-name collision."""
-    def assess(self, card, source_values):
-        result = super().assess(card, source_values)
+    def assess(self, card, source_values, text=None):
+        result = super().assess(card, source_values, text)
         excluded = []; checks = []
         for finding in result['findings']:
             name = company_name(finding.get('employer', ''))

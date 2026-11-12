@@ -30,7 +30,7 @@ class StructuredBans:
   if len(job)>6 and isinstance(job[6],dict) and job[6].get('employment_uncertain'):
    certainty='probable';reason+='; '+job[6]['employment_uncertain']
   return dict(type='employment',row=rule['row'],rule=rule['name'],stage=rule['stage'],months=months,employer=employer,role=role,region=region,organization_type=kind,period=[start,end],evidence=' | '.join(str(x) for x in job[:6]),basis=reason,certainty=certainty,active=active,termination_upper_bound=finish.isoformat() if finish else None,expires=expiry.isoformat() if expiry else None,calculation_date=self.as_of.isoformat(),source='user_addendum' if str(rule['row']).startswith('USER_') else 'ФИО.csv' if str(rule['row']).startswith('ФИО:') else 'Компании.csv')
- def assess(self,card,source_values):
+ def assess(self,card,source_values,text=None):
   # Only reviewed candidate name and candidate contact columns, not references.
   identity='\n'.join([card.get('name',''),*card.get('previous_names',[]),*card.get('phones',[])])
   sv=list(source_values)
@@ -85,6 +85,8 @@ class StructuredBans:
     reason='Трудовая деятельность по отраслевому правилу'
     if certainty=='probable':reason+='; требуется уточнить '+('регион работодателя' if not rt and not elsewhere else 'государственный или частный статус организации')
     findings.append(self.finding(self.rules[row],job,certainty,reason))
+  from .partner262 import relationship_findings
+  findings.extend(relationship_findings(self.base.run,card,text,self.rules.get(262,{}),self.finding))
   unique={str((f['row'],f.get('employer'),f.get('period'),f.get('basis'))):f for f in findings}
   findings=list(unique.values());active=[f for f in findings if f['active']]
   people={p['row']:p for p in self.base.people}

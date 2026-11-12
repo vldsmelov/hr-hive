@@ -6,11 +6,74 @@ import shutil
 import sqlite3
 import tarfile
 import tempfile
+from collections import Counter
 from pathlib import Path
 from .common import DATA, dump, layout, read, sha, stamp
 
 EXCLUDED_DIRS={'cvs','converted','ocr_images','audio_env','audio_models','.venv','venv','__pycache__','.git','node_modules','hr-hive','transfer','migration_staging'}
 EXCLUDED_SUFFIXES={'.png','.jpg','.jpeg','.gif','.webp','.bmp','.tif','.tiff','.pdf','.doc','.docx','.rtf','.pages','.odt','.aac','.pptx','.dotx','.jfif','.crdownload','.zip','.pyc'}
+CV_BINARY_SUFFIXES=EXCLUDED_SUFFIXES|{'.heic','.emf','.wmf','.svg','.ico','.bin','.xls','.xlsm','.ods'}
+
+
+def evidence_inventory(source):
+    """Explicit, hash-bound public proofs outside frozen inputs; never whole dirs."""
+    inventory=source/'state/backup_evidence.json'
+    result={}
+    if not inventory.exists():return result
+    for record in read(inventory)['files']:
+        rel=Path(record['path'])
+        if (rel.is_absolute() or '..' in rel.parts or '\\' in record['path']
+                or rel.parts[0] in ('cvs','backups') or record.get('role')!='rule_evidence'):
+            raise ValueError('Недопустимый путь подтверждения правил')
+        path=source/rel
+        if path.is_symlink() or not path.is_file() or sha(path)!=record['sha256']:
+            raise ValueError('Изменён файл подтверждения правил: '+rel.as_posix())
+        result[rel.as_posix()]=record['sha256']
+    return result
+
+
+def diagnostic_inventory(source, require_files=True):
+    inventory=source/'state/backup_exclusions.json';result={}
+    if not inventory.exists():return result
+    for record in read(inventory)['files']:
+        rel=Path(record['path'])
+        if (rel.is_absolute() or '..' in rel.parts or '\\' in record['path']
+                or len(rel.parts)<3 or rel.parts[0]!='state'
+                or rel.parts[1] in ('runs','history','source_blocks','cards')
+                or record.get('role')!='diagnostic_copy' or not record.get('reason')):
+            raise ValueError('Нельзя исключить рабочие данные из бэкапа')
+        path=source/rel
+        if ((require_files or path.exists()) and
+                (not path.is_file() or path.is_symlink() or sha(path)!=record['sha256'])):
+            raise ValueError('Изменена исключаемая диагностическая копия: '+str(rel))
+        result[rel.as_posix()]=record
+    return result
+
+
+def exclusion_reason(path, source, evidence, skip_cvs=True, diagnostics=None):
+    rel=path.relative_to(source);parts=rel.parts
+    if path.is_symlink():return 'symlink'
+    if parts[0]=='backups':return 'previous_backup'
+    if skip_cvs and parts[0]=='cvs':return 'cv_original'
+    if any(x.lower() in ('__pycache__','.git','audio_models','audio_env','.venv','venv','node_modules','lo_profile') for x in parts):
+        return 'runtime_cache'
+    if path.name.endswith(('-wal','-shm','.tmp','.crdownload')) or path.name.startswith('~$'):
+        return 'temporary'
+    if rel.as_posix() in (diagnostics or {}):return 'diagnostic_copy'
+    if path.suffix.lower() in ('.tar','.gz','.zip','.7z'):return 'nested_archive'
+    if rel.as_posix() in evidence:return None
+    # Criteria may legitimately contain PDF/image evidence. Frozen input paths
+    # and the operator's full source set have an explicit non-CV purpose.
+    if parts[0]=='sources' or 'inputs' in parts:return None
+    if not skip_cvs:return None
+    if path.suffix.lower() in CV_BINARY_SUFFIXES:return 'cv_binary_or_render'
+    if path.suffix.lower()=='.xlsx' and path.stem.isdigit() and parts[0]!='exports':
+        return 'cv_questionnaire'
+    if not path.suffix:
+        with path.open('rb') as stream:head=stream.read(16)
+        if head.startswith((b'%PDF',b'PK\x03\x04',b'\xd0\xcf\x11\xe0',b'\x89PNG',b'\xff\xd8\xff',b'{\\rtf')):
+            return 'cv_binary_without_extension'
+    return None
 
 def snapshot(source,dest,strip_originals=True):
     dest.parent.mkdir(parents=True,exist_ok=True)
@@ -28,17 +91,26 @@ def snapshot(source,dest,strip_originals=True):
 def archive_tree(source,target,skip_cvs=True):
     """Snapshot databases into staging before compressing; manifest covers every file."""
     source=Path(source);target=Path(target);target.parent.mkdir(parents=True,exist_ok=True)
-    manifest={'format':'hr-hive-backup-v1','created_utc':stamp(),'files':[],'excluded_originals':True}
+    if target.exists():raise ValueError('Архив уже существует; выберите новое имя')
+    evidence=evidence_inventory(source);diagnostics=diagnostic_inventory(source);excluded=Counter()
+    manifest={'format':'hr-hive-backup-v1','created_utc':stamp(),'files':[],
+              'excluded_originals':skip_cvs,'excluded_files':[],'rule_evidence':evidence,
+              'excluded_diagnostics':list(diagnostics.values())}
+    temporary=target.with_name(target.name+'.tmp')
     with tempfile.TemporaryDirectory() as t:
         stage=Path(t)
-        with tarfile.open(target,'w:gz',compresslevel=5) as tar:
+        with tarfile.open(temporary,'w:gz',compresslevel=5) as tar:
             for p in sorted(source.rglob('*')):
                 if not p.is_file():continue
-                if p.resolve() in (target.resolve(),target.with_name(target.name+'.sha256').resolve()):continue
+                if p.resolve() in (target.resolve(),temporary.resolve(),target.with_name(target.name+'.sha256').resolve()):continue
                 rel=p.relative_to(source)
-                if skip_cvs and rel.parts[0] in ('cvs','backups'):continue
-                if any(x.lower() in ('__pycache__','.git','audio_models','audio_env','.venv','venv','node_modules') for x in rel.parts):continue
-                if p.name.endswith(('-wal','-shm','.tmp')):continue
+                reason=exclusion_reason(p,source,evidence,skip_cvs,diagnostics)
+                if reason:
+                    excluded[reason]+=1
+                    # Original hashes/paths already live in candidate manifests.
+                    if reason not in ('cv_original','previous_backup','runtime_cache'):
+                        manifest['excluded_files'].append({'path':rel.as_posix(),'reason':reason})
+                    continue
                 use=p;stripped=0
                 if p.suffix=='.sqlite':
                     use=stage/rel;stripped=snapshot(p,use)
@@ -46,9 +118,11 @@ def archive_tree(source,target,skip_cvs=True):
                 if stripped:rec['excluded_cv_blobs']=stripped
                 manifest['files'].append(rec)
                 tar.add(use,arcname=rel.as_posix(),recursive=False)
+            manifest['excluded_counts']=dict(excluded)
             payload=json.dumps(manifest,ensure_ascii=False,indent=2).encode()
             import io
             info=tarfile.TarInfo('BACKUP_MANIFEST.json');info.size=len(payload);tar.addfile(info,io.BytesIO(payload))
+    temporary.replace(target)
     checksum=sha(target);target.with_name(target.name+'.sha256').write_text(checksum+'  '+target.name+'\n',encoding='ascii')
     return {'path':str(target),'sha256':checksum,'files':len(manifest['files']),'bytes':target.stat().st_size}
 

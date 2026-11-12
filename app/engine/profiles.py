@@ -4,6 +4,7 @@ The JSONL is an assessment journal, not a table of routing exceptions. No ID is
 used in the scoring or ban rules. A new CV requires a complete semantic review.
 """
 import json,re,hashlib,shutil
+from decimal import Decimal,ROUND_HALF_UP
 from types import SimpleNamespace
 import openpyxl
 base = SimpleNamespace(openpyxl=openpyxl)
@@ -17,6 +18,7 @@ base = SimpleNamespace(openpyxl=openpyxl)
 TEACHING=set(range(91,105))|set(range(126,132))|set(range(147,150))
 ALIASES={'Департамент логистики':'ДЛ','ЦС (проектный блок)':'ЦС (ПБ)','HR':'Управление HR'}
 WEIGHTS=[40,30,20,10]
+LEADERS_SCORE_MULTIPLIER=Decimal('1.15')
 
 def catalog(run):
  # Independent reader: no import or execution of the previous automatic matcher.
@@ -47,6 +49,8 @@ def assess(card,profiles):
   key,components,family,basis,*extra=review
   assert key in profiles,key
   p=profiles[key];assert family in card['tracks'],(card['id'],family)
+  if p['cluster']=='100 Лидеров':
+   rejected.append(dict(profile=key,reason='100 Лидеров рассчитывается только по двум независимым направлениям'));continue
   if any(x.get('profile')==key for x in rejected):continue
   missing=extra[0] if extra else ''
   if (key=='QA_N091' or key.startswith('N') and int(key[1:]) in TEACHING) and not card.get('pedagogy'):
@@ -78,7 +82,10 @@ def assess(card,profiles):
    if eligible:
     item=max(eligible,key=lambda r:r['score']);best.append(item);used_families.update(group)
   best.sort(key=lambda r:r['score'],reverse=True)
-  if len(best)>=2:assessed.append(dict(profile_key='USER_100',profile='Два независимых профессиональных направления',cluster='100 Лидеров',score=min(best[0]['score'],best[1]['score']),family='multifunctional',basis='; '.join(r['family']+': '+r['basis'] for r in best[:2]),evidence=[r['evidence'] for r in best[:2]],missing='',direction_scores=[r['score'] for r in best[:2]]))
+  if len(best)>=2:
+   base_score=min(best[0]['score'],best[1]['score'])
+   score=min(100,int((Decimal(base_score)*LEADERS_SCORE_MULTIPLIER).quantize(Decimal('1'),rounding=ROUND_HALF_UP)))
+   assessed.append(dict(profile_key='USER_100',profile='Два независимых профессиональных направления',cluster='100 Лидеров',score=score,base_score=base_score,score_multiplier=float(LEADERS_SCORE_MULTIPLIER),family='multifunctional',basis='; '.join(r['family']+': '+r['basis'] for r in best[:2]),evidence=[r['evidence'] for r in best[:2]],missing='',direction_scores=[r['score'] for r in best[:2]]))
  clusters={}
  for r in assessed:
   if r['score']>=60 and (r['cluster'] not in clusters or r['score']>clusters[r['cluster']]['score']):clusters[r['cluster']]=r

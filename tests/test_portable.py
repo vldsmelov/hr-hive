@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import os
@@ -47,6 +48,35 @@ class PortableTest(unittest.TestCase):
         result={'department':'УПИ 88','comment':'Уточнить опыт переговоров','ban':'нет','ban_comment':'','clusters':[{'cluster':'УПИ','score':88}]}
         with c:c.execute('INSERT INTO candidates(id,source_row,files,fingerprint,extraction_status,text,review_status,result) VALUES(?,?,?,?,?,?,?,?)',(ident,self.source[ident][0],'[]','hash','ready','Полный текст кандидата\n' * 20,'reviewed' if done else 'pending',json.dumps(result,ensure_ascii=False) if done else None))
         c.close()
+
+    def test_engine_hash_line_endings_and_substantive_changes(self):
+        engine=self.root/'engine';engine.mkdir()
+        source=engine/'example.py';lf=b'value = 1\n# test\n'
+        def legacy_hash(content):
+            pairs=[('example.py',hashlib.sha256(content).hexdigest())]
+            return hashlib.sha256(json.dumps(pairs).encode()).hexdigest()
+        saved_lf=legacy_hash(lf);saved_crlf=legacy_hash(lf.replace(b'\n',b'\r\n'))
+        with patch.object(service,'__file__',str(self.root/'service.py')):
+            for content in (lf,lf.replace(b'\n',b'\r\n')):
+                source.write_bytes(content)
+                self.assertEqual(service.implementation_hash(),saved_lf)
+                self.assertTrue(service.implementation_matches(saved_lf))
+                self.assertTrue(service.implementation_matches(saved_crlf))
+            source.write_bytes(lf.replace(b'1',b'2'))
+            self.assertFalse(service.implementation_matches(saved_lf))
+            self.assertFalse(service.implementation_matches(saved_crlf))
+
+    def test_legacy_engine_hash_accepted_by_scan_and_preview(self):
+        self.candidate();service.claim('codex',1);shown=service.show('102')
+        meta=common.read(self.run/'portable.json')
+        meta['implementation_hash']=service.implementation_hash('crlf')
+        common.dump(self.run/'portable.json',meta)
+        self.assertEqual(service.scan()['changed'],[])
+        card={'id':'102','full_text_review_complete':True,'reviewed_text_sha256':shown['text_sha256'],'comment':'English comment'}
+        with self.assertRaisesRegex(ValueError,'русский'):service.preview(card)
+        meta['implementation_hash']='different-engine';common.dump(self.run/'portable.json',meta)
+        with self.assertRaisesRegex(ValueError,'движок правил'):service.scan()
+        with self.assertRaisesRegex(ValueError,'Движок правил'):service.preview(card)
 
     def test_export_source_fields_links_validation_and_recovery(self):
         self.candidate(done=True)
@@ -133,6 +163,52 @@ class PortableTest(unittest.TestCase):
         _,rejected,result=assess(card,profiles);self.assertEqual(len(result),2);self.assertFalse(rejected);self.assertEqual(result[0]['score'],86)
         changed=copy.deepcopy(card);changed.update(age=90,sex='female',birth_date='1930-01-01')
         self.assertEqual(assess(card,profiles),assess(changed,profiles))
+
+    def test_100_leaders_multiplier_changes_ranking_and_is_repeatable(self):
+        profiles={key:{'cluster':cluster,'profile':'Профиль','education':'Профильное','experience':'1-3 года'} for key,cluster in [('A','Инженерный'),('B','Коммерческий'),('C','Другой')]}
+        card={'id':'synthetic','tracks':{family:['specialist',3,'Цитата','Задачи'] for family in ['engineering','sales','other']},'reviews':[['A',[36,27,18,9],'engineering','Подтверждённые задачи',''],['B',[32,24,16,8],'sales','Подтверждённые задачи',''],['C',[35,27,17,9],'other','Подтверждённые задачи','']],'independent_directions':[['engineering'],['sales']]}
+        original=copy.deepcopy(card)
+        expected=None
+        for _ in range(3):
+            assessed,rejected,chosen=assess(card,profiles)
+            self.assertFalse(rejected)
+            self.assertEqual([(r['cluster'],r['score']) for r in chosen],[('100 Лидеров',92),('Инженерный',90),('Другой',88)])
+            leader=next(r for r in assessed if r['profile_key']=='USER_100')
+            self.assertEqual((leader['base_score'],leader['score_multiplier'],leader['direction_scores']),(80,1.15,[90,80]))
+            self.assertEqual([r['score'] for r in assessed if r['profile_key']!='USER_100'],[90,80,88])
+            if expected is not None:self.assertEqual((assessed,rejected,chosen),expected)
+            expected=(assessed,rejected,chosen)
+        self.assertEqual(card,original)
+
+    def test_100_leaders_rounding_cap_and_admission(self):
+        profiles={key:{'cluster':cluster,'profile':'Профиль','education':'Профильное','experience':'1-3 года'} for key,cluster in [('A','Инженерный'),('B','Коммерческий')]}
+        for components,expected in [([24,18,12,6],69),([28,21,14,7],81),([35,27,17,9],100),([24,18,11,6],None)]:
+            with self.subTest(components=components):
+                card={'id':'synthetic','tracks':{family:['specialist',3,'Цитата','Задачи'] for family in ['engineering','sales']},'reviews':[['A',[40,30,20,10],'engineering','Подтверждённые задачи',''],['B',components,'sales','Подтверждённые задачи','']],'independent_directions':[['engineering'],['sales']]}
+                assessed,_,_=assess(card,profiles)
+                leaders=[r for r in assessed if r['profile_key']=='USER_100']
+                if expected is None:self.assertEqual(leaders,[])
+                else:self.assertEqual(leaders[0]['score'],expected)
+        # The same profession in multiple clusters cannot unlock the multiplier.
+        card['reviews'][1][2]='engineering';card['reviews'][1][1]=[40,30,20,10]
+        card['independent_directions']=[['engineering'],['engineering']]
+        self.assertFalse(any(r['profile_key']=='USER_100' for r in assess(card,profiles)[0]))
+
+    def test_100_leaders_weighted_score_is_saved_and_exported(self):
+        self.ban_sources();self.candidate();service.claim('codex',1);shown=service.show('102')
+        profiles={key:{'cluster':cluster,'profile':'Профиль','education':'Профильное','experience':'1-3 года'} for key,cluster in [('A','Инженерный'),('B','Коммерческий')]}
+        card={'id':'102','name':'Синтетический Кандидат','phones':[],'education':'Подтверждённое образование','jobs':[],'tracks':{family:['specialist',3,'Полный текст кандидата','Подтверждённые задачи'] for family in ['engineering','sales']},'reviews':[['A',[36,27,18,9],'engineering','Подтверждённые задачи',''],['B',[32,24,16,8],'sales','Подтверждённые задачи','']],'independent_directions':[['engineering'],['sales']],'comment':'Подтверждены две независимые специализации','reviewed_text_sha256':shown['text_sha256'],'full_text_review_complete':True}
+        with patch('app.service.catalog',return_value=profiles):
+            result=service.submit(card,'codex')
+        self.assertEqual(result['clusters'][0],{'cluster':'100 Лидеров','score':92})
+        leader=next(r for r in result['profile_assessments'] if r['profile_key']=='USER_100')
+        self.assertEqual((leader['base_score'],leader['score_multiplier']),(80,1.15))
+        c=common.connect(self.run/'state.sqlite')
+        saved=json.loads(c.execute("SELECT result FROM candidates WHERE id='102'").fetchone()[0]);c.close()
+        self.assertEqual(saved['department'],'100 Лидеров 92; Инженерный 90; Коммерческий 80')
+        workbook=load_workbook(result['export']['path'],read_only=True)
+        try:self.assertEqual(workbook.worksheets[0]['AD2'].value,saved['department'])
+        finally:workbook.close()
 
     def test_termination_upper_boundary(self):
         self.assertEqual(str(end_date('2024')),'2024-12-31')

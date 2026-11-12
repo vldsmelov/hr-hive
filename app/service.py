@@ -6,12 +6,13 @@ import shutil
 import sqlite3
 import unicodedata
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
 from .common import DATA, active, connect, dump, layout, read, sha, stamp
-from .documents import extract_file, broken
+from .documents import extract_file, broken, require_complete_source
 from .books import template, source_sheet, export
 from .engine.bans import StructuredBans
 from .engine.pilot150_bans import brief
@@ -21,13 +22,24 @@ from .engine.profiles import assess, catalog
 def portable_meta(run):
     return read(run/'portable.json')
 
-def implementation_hash():
-    folder=Path(__file__).parent/'engine'
-    pairs=[(p.name,sha(p)) for p in sorted(folder.glob('*.py'))]
+def implementation_hash_from(folder, line_ending='lf'):
+    folder=Path(folder)
+    pairs=[]
+    for p in sorted(folder.glob('*.py')):
+        content=p.read_bytes().replace(b'\r\n',b'\n')
+        if line_ending=='crlf':content=content.replace(b'\n',b'\r\n')
+        pairs.append((p.name,hashlib.sha256(content).hexdigest()))
     return hashlib.sha256(json.dumps(pairs).encode()).hexdigest()
 
+def implementation_hash(line_ending='lf'):
+    return implementation_hash_from(Path(__file__).parent/'engine', line_ending)
+
+def implementation_matches(saved_hash):
+    # Windows transfers used CRLF bytes; accept only the same current sources.
+    return saved_hash in (implementation_hash(),implementation_hash('crlf'))
+
 def rules_hash(inputs):
-    pairs=[(unicodedata.normalize('NFC',str(p.relative_to(inputs)).replace('\\','/')),sha(p)) for p in inputs.rglob('*') if p.is_file() and p.suffix.lower() in ('.csv','.xlsx','.json')]
+    pairs=[(unicodedata.normalize('NFC',str(p.relative_to(inputs)).replace('\\','/')),sha(p)) for p in inputs.rglob('*') if p.is_file() and p.suffix.lower() in ('.csv','.xlsx','.json','.md')]
     return hashlib.sha256(json.dumps(sorted(pairs),ensure_ascii=False).encode()).hexdigest()
 
 def prepare(run):
@@ -42,13 +54,82 @@ def prepare(run):
     ''')
     c.close()
 
+def require_complete_candidate_source(run, row):
+    """Identity conflicts concern a candidate's file set, not the shared binary."""
+    path=run/'candidate_source_blocks'/(str(row['id'])+'.json')
+    if not path.exists():return
+    proof=read(path)
+    if (str(proof.get('id'))!=str(row['id']) or not proof.get('fingerprint')
+            or not str(proof.get('reason','')).strip()):
+        raise ValueError('Повреждено подтверждение конфликта исходников кандидата')
+    if proof['fingerprint']==row['fingerprint']:
+        raise ValueError('Исходник неполон: '+proof['reason'])
+
+def reject_source(ident, report_path, worker):
+    """Record a verified incomplete original without manufacturing an assessment."""
+    run=active();prepare(run)
+    report_path=Path(report_path);report=read(report_path);ident=str(ident)
+    visual=report.get('source_visual_review_complete') is True
+    textual=report.get('source_document_review_complete') is True
+    if (str(report.get('id'))!=ident or report.get('full_text_review_complete') is not False
+            or not (visual or textual)):
+        raise ValueError('Нужно подтверждение полного просмотра исходника для этого ID')
+    reason=str(report.get('reason','')).strip()
+    if len(reason)<40:raise ValueError('Нужна конкретная причина неполноты исходника')
+    scope=report.get('scope','document')
+    if scope not in ('document','candidate'):raise ValueError('Неизвестная область блокировки исходника')
+    c=connect(run/'state.sqlite')
+    try:
+        with c:
+            c.execute('BEGIN IMMEDIATE')
+            row=c.execute('SELECT * FROM candidates WHERE id=?',(ident,)).fetchone()
+            owner=c.execute('SELECT worker FROM portable_claims WHERE id=?',(ident,)).fetchone()
+            if not row or not owner or owner[0]!=worker:raise ValueError('ID не закреплен за worker')
+            if row['review_status']=='reviewed':raise ValueError('Завершённый результат менять нельзя')
+            file=next((f for f in json.loads(row['files']) if f['path']==report.get('source_file')),None)
+            if not file or file['sha256']!=report.get('sha256'):
+                raise ValueError('Отчёт относится к другому файлу или хешу')
+            original=DATA/'cvs'/file['path']
+            if not original.is_file() or sha(original)!=file['sha256']:
+                raise ValueError('Изменён или отсутствует оригинал резюме')
+            if hashlib.sha256((row['text'] or '').encode()).hexdigest()!=report.get('reviewed_text_sha256'):
+                raise ValueError('Отчёт относится к другому извлечённому тексту')
+            if textual and not visual:
+                end=0
+                for start,stop in report.get('read_parts',[]):
+                    if start!=end or stop<start or stop>len(row['text'] or ''):
+                        raise ValueError('Не подтверждено полное текстовое чтение исходника')
+                    end=stop
+                if (end!=len(row['text'] or '') or not end or
+                        report.get('read_files')!=[f['path'] for f in json.loads(row['files'])]):
+                    raise ValueError('Не подтверждено полное текстовое чтение исходника')
+            error='Исходник неполон: '+reason
+            if row['extraction_status']=='error' and row['error']==error:
+                return {'id':ident,'changed':False,'error':error}
+            proof={'id':ident,'sha256':file['sha256'],'source_file':file['path'],
+                   'reason':reason,'reviewer':report.get('reviewer',worker),
+                   'confirmed_by':'coordinator','created':stamp(),
+                   'report_sha256':sha(report_path)}
+            if scope=='candidate':proof.update(scope=scope,fingerprint=row['fingerprint'])
+            audit=run/'audit/source_blocks'/(ident+'_'+proof['report_sha256']+'.json')
+            if not audit.exists():dump(audit,{'before':dict(row),'report':report,'proof':proof})
+            if scope=='candidate':dump(run/'candidate_source_blocks'/(ident+'.json'),proof)
+            else:dump(DATA/'state/source_blocks'/(file['sha256']+'.json'),proof)
+            c.execute("UPDATE candidates SET extraction_status='error',error=? WHERE id=?",(error,ident))
+            c.execute('INSERT INTO portable_revisions(id,kind,payload,created) VALUES(?,?,?,?)',
+                      (ident,'source_incomplete',json.dumps(proof,ensure_ascii=False),stamp()))
+        return {'id':ident,'changed':True,'error':error,'audit':str(audit)}
+    finally:c.close()
+
 def source_rows(run):
+    id_index=portable_meta(run).get('id_column',2)-1
     wb=load_workbook(template(run),read_only=True,data_only=False)
     try:
         result={}
         for n,v in enumerate(wb[source_sheet(run)].iter_rows(min_row=2,values_only=True),2):
-            if len(v)<2 or v[1] is None:continue
-            ident=str(v[1])
+            if len(v)<=id_index or v[id_index] is None:continue
+            ident=str(v[id_index]).strip()
+            if not ident:continue
             if ident in result:raise ValueError('Повторный ID в исходной таблице: '+ident)
             result[ident]=(n,v)
         return result
@@ -69,6 +150,7 @@ def new_run(previous=None):
         candidates=[p for p in (run/'inputs').glob('*.xlsx') if 'образец' not in p.name.lower()]
         if len(candidates)!=1:raise ValueError('В data/sources нужна одна исходная книга XLSX и каталоги clusters/banlist')
         src=candidates[0];meta={}
+    shutil.copy2(Path(__file__).parent.parent/'rules/accepted_rules.md',run/'inputs/accepted_rules.md')
     wb=load_workbook(src,read_only=True)
     sheet=next((n for n in wb.sheetnames if 'матка' in n.lower()),wb.sheetnames[0]);wb.close()
     meta.update(as_of=datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat(),sheet=sheet,version='portable-1')
@@ -99,6 +181,8 @@ def scan(new_version=False):
     run=active() if (DATA/'state'/'active.json').exists() else new_run()
     prepare(run)
     meta=portable_meta(run)
+    if meta.get('batch_key'):
+        raise ValueError('Архивный запуск ограничен своим манифестом; используйте import-archive для нового пакета или новой версии')
     # Compare only sources provided by the operator. Missing files are not deletions.
     changed=[]
     for p in (DATA/'sources').rglob('*'):
@@ -112,7 +196,7 @@ def scan(new_version=False):
         run=new_run(run)
     if rules_hash(run/'inputs')!=portable_meta(run)['rules_hash']:
         raise ValueError('Изменён снимок источников активного запуска; восстановите его и создайте новую версию через data/sources')
-    if implementation_hash()!=portable_meta(run)['implementation_hash']:
+    if not implementation_matches(portable_meta(run)['implementation_hash']):
         raise ValueError('Изменён движок правил: требуется scan --new-version')
     prepare(run);source=source_rows(run)
     groups=collections.defaultdict(list);ignored=[]
@@ -171,10 +255,12 @@ def extract(retry=False,ids=None):
         if row['extraction_status']=='ready' and not retry:continue
         if row['extraction_status']=='error' and not retry:continue
         try:
+            require_complete_candidate_source(run,row)
             docs=[];used=set()
             for f in json.loads(row['files']):
                 if f['sha256'] in used:continue
                 used.add(f['sha256']);p=locate(f)
+                require_complete_source(f['sha256'])
                 cached=c.execute("SELECT pages FROM documents WHERE hash=? AND status='ready'",(f['sha256'],)).fetchone() if not retry else None
                 pages=json.loads(cached[0]) if cached else []
                 if pages and all(pg.get('text','').strip() and not broken(pg['text']) and pg.get('method')!='ocr_pending' for pg in pages):
@@ -214,6 +300,11 @@ def russian(value,label):
     if broken(value) or re.search(r'\?{2,}',value):raise ValueError(label+': повреждённые символы')
     if not re.search('[А-Яа-яЁё]',value):raise ValueError(label+': требуется русский текст')
 
+@lru_cache(maxsize=4)
+def review_context(run, verified_rules_hash, verified_implementation_hash):
+    """Cache immutable inputs only after preview verifies their current bytes."""
+    return source_rows(run),StructuredBans(run),catalog(run)
+
 def preview(card,worker=None):
     run=active();prepare(run);c=connect(run/'state.sqlite');ident=str(card['id'])
     r=c.execute('SELECT * FROM candidates WHERE id=?',(ident,)).fetchone()
@@ -221,9 +312,28 @@ def preview(card,worker=None):
     owner=c.execute('SELECT worker FROM portable_claims WHERE id=?',(ident,)).fetchone()
     c.close()
     if not r or r['extraction_status']!='ready':raise ValueError('Текст не готов')
+    require_complete_candidate_source(run,r)
     if not card.get('full_text_review_complete'):raise ValueError('Не подтверждено полное чтение')
-    if rules_hash(run/'inputs')!=portable_meta(run)['rules_hash']:raise ValueError('Источники версии изменены; требуется новая версия проверки')
-    if implementation_hash()!=portable_meta(run)['implementation_hash']:raise ValueError('Движок правил изменён; требуется scan --new-version')
+    meta=portable_meta(run);current_rules_hash=rules_hash(run/'inputs')
+    if meta.get('amendment_key'):
+        from .amendments import verify_amendment_run
+        verify_amendment_run(run, card, deep=False)
+    if current_rules_hash!=meta['rules_hash']:raise ValueError('Источники версии изменены; требуется новая версия проверки')
+    if not implementation_matches(meta['implementation_hash']):raise ValueError('Движок правил изменён; требуется scan --new-version')
+    if meta.get('batch_key'):
+        from .documents import _cached_visual_reviews_valid,EXTRACTION_VERSION
+        for file in json.loads(r['files']):
+            original=DATA/'cvs'/file['path']
+            if not original.is_file() or sha(original)!=file['sha256']:
+                raise ValueError('Изменён или отсутствует оригинал резюме; требуется повторный импорт')
+            require_complete_source(file['sha256'])
+        docs=json.loads(r['documents'] or '[]')
+        if not docs:raise ValueError('Не сохранены документы извлечения')
+        for doc in docs:
+            if not doc.get('complete') or not _cached_visual_reviews_valid(doc):
+                raise ValueError('Не подтверждена полнота документа или отозвана визуальная проверка')
+            if any('ocr' in page.get('method','').lower() for page in doc['pages']) and doc.get('extraction_version',0)<EXTRACTION_VERSION:
+                raise ValueError('Требуется повторное извлечение с исправленной версией OCR')
     h=hashlib.sha256(r['text'].encode()).hexdigest()
     if card.get('reviewed_text_sha256')!=h:raise ValueError('Укажите актуальный reviewed_text_sha256 из show')
     end=0
@@ -238,13 +348,16 @@ def preview(card,worker=None):
     for review in card.get('reviews',[]):
         russian(review[3],'Основание оценки')
         if len(review)>4:russian(review[4],'Пробелы')
-    ban=attach(StructuredBans(run).assess(card,source_rows(run)[ident][1]),card,r['text'])
+    source,bans,profiles=review_context(run,current_rules_hash,meta['implementation_hash'])
+    ban=attach(bans.assess(card,source[ident][1],r['text']),card,r['text'])
     if any(not f.get('source_excerpt') for f in ban['active']):raise ValueError('Для бана требуется цитата; добавьте ban_quote_anchors')
-    assessed,rejected,chosen=assess(card,catalog(run)) if ban['ban']=='нет' else ([],[],[])
+    assessed,rejected,chosen=assess(card,profiles) if ban['ban']=='нет' else ([],[],[])
     clusters=[{'cluster':x['cluster'],'score':x['score']} for x in chosen]
     comment=card.get('comment','') if ban['ban']=='нет' else ''
     if not comment and chosen:comment='; '.join(dict.fromkeys(x['missing'] for x in chosen if x['missing']))
-    result={'id':ident,'ai':'да','ban':ban['ban'],'ban_comment':brief(ban),'department':'Бан' if ban['ban']=='да' else '; '.join(x['cluster']+' '+str(x['score']) for x in clusters) if clusters else 'Подходящих кластеров не выявлено','comment':comment,'clusters':clusters,'ban_assessment':ban,'profile_assessments':assessed,'excluded_profiles':rejected,'fact_card':card,'text_sha256':h,'rules_hash':portable_meta(run)['rules_hash'],'review_method':'portable-semantic-v1'}
+    result={'id':ident,'ai':'да','ban':ban['ban'],'ban_comment':brief(ban),'department':'Бан' if ban['ban']=='да' else '; '.join(x['cluster']+' '+str(x['score']) for x in clusters) if clusters else 'Подходящих кластеров не выявлено','comment':comment,'clusters':clusters,'ban_assessment':ban,'profile_assessments':assessed,'excluded_profiles':rejected,'fact_card':card,'text_sha256':h,'rules_hash':portable_meta(run)['rules_hash'],'review_method':'portable-semantic-v1','implementation_hash':meta['implementation_hash']}
+    if meta.get('amendment_key'):
+        result['amendment_receipt_sha256']=meta['amendment_receipt_sha256']
     return result
 
 def submit(card,worker):

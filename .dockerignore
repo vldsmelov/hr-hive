@@ -5,5 +5,7 @@
 !app/**
 !rules/
 !rules/**
+!tools/
+!tools/**
 **/__pycache__
 **/*.pyc
